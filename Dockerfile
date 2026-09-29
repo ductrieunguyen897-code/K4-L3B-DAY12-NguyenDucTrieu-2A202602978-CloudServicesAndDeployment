@@ -21,14 +21,40 @@
 #            docker images day12-agent:prod     # xem dung lượng
 # ═══════════════════════════════════════════════════════════════════
 
-FROM python:3.11
+# ── Stage 1: builder ─────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ── Stage 2: runtime ─────────────────────────────────────────────
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY . .
+# Copy installed dependencies from builder (no compiler / build tools in final image)
+COPY --from=builder /install /usr/local
 
-RUN pip install -r requirements.txt
+# Copy source code (after deps → better layer caching)
+COPY app/ ./app/
+COPY utils/ ./utils/
 
-EXPOSE 8000
+# Create non-root user
+RUN addgroup --system appgroup && \
+    adduser --system --ingroup appgroup appuser
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+USER appuser
+
+# Port from environment variable, default 8000
+ENV PORT=8000
+EXPOSE ${PORT}
+
+# Liveness check against /health
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen(f'http://localhost:{__import__(\"os\").environ.get(\"PORT\",8000)}/health')" || exit 1
+
+# Start Uvicorn, bind 0.0.0.0, read port from $PORT
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
